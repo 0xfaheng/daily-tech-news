@@ -266,6 +266,51 @@ def count_chinese_chars(text: str) -> int:
     return len(re.findall(r"[\u4e00-\u9fa5]", text or ""))
 
 
+CN_PUNCT = "，。；！？、：…"
+CN_TERMINAL = "。！？…"
+
+
+def count_cn_punct(text: str) -> int:
+    """统计中文标点数量（不含成对引号/括号）。"""
+    return sum(1 for ch in (text or "") if ch in CN_PUNCT)
+
+
+def has_terminal_punct(text: str) -> bool:
+    """文本是否以终止标点收尾。"""
+    text = (text or "").rstrip()
+    return bool(text) and text[-1] in CN_TERMINAL
+
+
+def validate_punctuation(text: str, min_internal: int = 1, require_terminal: bool = True) -> tuple:
+    """校验文本的标点完整性。返回 (是否通过, 失败原因)。"""
+    text = (text or "").strip()
+    if not text:
+        return False, "文本为空"
+    if count_cn_punct(text) < min_internal:
+        return False, f"中文标点不足（需≥{min_internal}个）"
+    if require_terminal and not has_terminal_punct(text):
+        return False, "未以终止标点收尾"
+    return True, ""
+
+
+def split_long_paragraph_to_briefs(text: str, expected: int) -> List[str]:
+    """LLM 把多条简报粘成一段时，按句号切分均匀分配。"""
+    if not text:
+        return []
+    sentences = [s.strip() for s in re.split(r"(?<=[。！？])", text) if s.strip()]
+    if not sentences:
+        return []
+    if len(sentences) <= expected:
+        return sentences
+    per = max(1, len(sentences) // expected)
+    grouped = []
+    for i in range(expected):
+        start = i * per
+        end = start + per if i < expected - 1 else len(sentences)
+        grouped.append("".join(sentences[start:end]))
+    return grouped
+
+
 def extract_ascii_tokens(text: str) -> List[str]:
     """提取标题中的英文/数字混合词。"""
     return re.findall(r"[A-Za-z][A-Za-z0-9.+\-]*", text or "")
@@ -383,6 +428,7 @@ def is_valid_news_title(title: str) -> bool:
 # 配置
 DOUBAO_API_KEY = get_env_var("DOUBAO_API_KEY", required=False)
 DEEPSEEK_API_KEY = get_env_var("DEEPSEEK_API_KEY", required=False)
+QWEN_API_KEY = get_env_var("QWEN_API_KEY", required=False) or get_env_var("DASHSCOPE_API_KEY", required=False)
 ANTHROPIC_API_KEY = get_env_var("ANTHROPIC_API_KEY", required=False)
 ANTHROPIC_BASE_URL = get_env_var("ANTHROPIC_BASE_URL", required=False) or "https://api.anthropic.com"
 TAVILY_API_KEY = get_env_var("TAVILY_API_KEY", required=False)
@@ -396,7 +442,9 @@ if not ANTHROPIC_API_KEY:
     print("错误: 未设置 ANTHROPIC_API_KEY（环境变量或 .env.local）")
     sys.exit(1)
 if not DEEPSEEK_API_KEY:
-    print("警告: 未设置 DEEPSEEK_API_KEY，Claude 失败时将无文本兜底")
+    print("警告: 未设置 DEEPSEEK_API_KEY，Claude 失败时将依赖 Qwen 兜底")
+if not QWEN_API_KEY:
+    print("警告: 未设置 QWEN_API_KEY/DASHSCOPE_API_KEY，DeepSeek 失败时将无最终兜底")
 if not DOUBAO_API_KEY:
     print("警告: 未设置 DOUBAO_API_KEY，封面图生成将跳过")
 if not TAVILY_API_KEY:
@@ -1559,17 +1607,19 @@ def extract_fact_sentences(item: Dict, subject: str, related_entities: List[str]
             sentences.append(cleaned)
 
     excerpt = normalize_material_text(item.get("page_excerpt", ""))
-    for sentence in re.split(r"[。！？\n]", excerpt):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        if len(sentence) > 90:
-            for clause in sentence.split("，"):
-                clause = clause.strip()
-                if clause:
-                    sentences.append(clause)
-            continue
-        sentences.append(sentence)
+    # 保留终止符：先按换行切，再按 (?<=[。！？]) 切（标点留在前一段尾部）
+    for raw_block in excerpt.split("\n"):
+        for sentence in re.split(r"(?<=[。！？])", raw_block):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(sentence) > 90:
+                for clause in sentence.split("，"):
+                    clause = clause.strip()
+                    if clause:
+                        sentences.append(clause)
+                continue
+            sentences.append(sentence)
 
     ranked = []
     for sentence in sentences:
@@ -1912,22 +1962,36 @@ def normalize_titles(categorized: Dict[str, List[Dict]]) -> Dict[str, List[Dict]
 请只输出 JSON 数组，长度必须为 {len(materials)}，每项格式如下：
 {{"id": 1, "subject": "...", "title": "..."}}"""
 
-    result = call_llm_api(prompt, max_tokens=2500)
-    payload = parse_json_payload(result, [])
+    def _call_and_parse():
+        raw = call_llm_api(prompt, max_tokens=2500)
+        parsed = parse_json_payload(raw, [])
+        rmap = {}
+        if isinstance(parsed, list):
+            for record in parsed:
+                if not isinstance(record, dict):
+                    continue
+                rid = record.get("id")
+                if not isinstance(rid, int) or not (1 <= rid <= len(selected_items)):
+                    continue
+                rmap[rid] = {
+                    "subject": clean_html_content(str(record.get("subject", ""))),
+                    "title": restore_precise_entities(
+                        selected_items[rid - 1],
+                        clean_html_content(str(record.get("title", "")))
+                    ),
+                }
+        return rmap
 
-    rewrite_map = {}
-    if isinstance(payload, list):
-        for record in payload:
-            if not isinstance(record, dict):
-                continue
-            rewrite_map[record.get("id")] = {
-                "subject": clean_html_content(str(record.get("subject", ""))),
-                "title": restore_precise_entities(
-                    selected_items[record.get("id") - 1],
-                    clean_html_content(str(record.get("title", "")))
-                ) if isinstance(record.get("id"), int) and 1 <= record.get("id") <= len(selected_items)
-                else clean_html_content(str(record.get("title", ""))),
-            }
+    rewrite_map = _call_and_parse()
+    # 长度不匹配立即整体重试一次（治"内容不完整"——避免静默吞掉缺失项）
+    expected_len = len(materials)
+    if len(rewrite_map) < expected_len:
+        log(f"  改写映射不完整 ({len(rewrite_map)}/{expected_len})，整体重试一次")
+        retry_map = _call_and_parse()
+        if len(retry_map) > len(rewrite_map):
+            rewrite_map = retry_map
+        if len(rewrite_map) < expected_len:
+            log(f"  改写映射仍不完整 ({len(rewrite_map)}/{expected_len})，缺失项走规则兜底")
 
     updated_count = 0
     kept_count = 0
@@ -1999,46 +2063,80 @@ def generate_news_briefs(categorized: Dict[str, List[Dict]]) -> Dict[str, List[D
             brief_text += f"   摘要: {summary}\n"
         brief_text += f"   来源: {source}\n\n"
 
-    prompt = f"""你是专业新闻编辑，为以下新闻各写1-2句简报（40-60字），补充标题未涵盖的关键信息。
+    prompt = f"""你是专业新闻编辑，为以下 {len(news_items_for_brief)} 条新闻各写1-2句简报（40-60字），补充标题未涵盖的关键信息。
 
 {brief_text}
 
-【要求】
-1. 每条简报40-60字，语法完整，信息量大
+【硬规则】
+1. 每条简报40-60字，语法完整，信息量大，必须含至少1个中文逗号或句号，必须以句号/问号/感叹号收尾
 2. 遵循新闻写作规范：Who（谁）、What（做了什么）、When/Where（时间/地点，如有）
 3. 补充标题中没有的信息（如具体数据、影响范围、技术细节）
 4. 如果摘要信息不足，基于标题合理推断，不要编造具体数字
 5. 中文输出，品牌名可保留英文
-6. 按原顺序每行输出一条简报，不要序号
+6. 严格输出 {len(news_items_for_brief)} 行，每行一条简报，按原顺序排列，不要序号、不要空行、不要前后说明，不得把多条粘成一行
 
 示例：
 该模型在多项基准测试中超越GPT-4o，推理速度提升40%，已面向企业用户开放API接口。"""
 
-    result = call_llm_api(prompt, max_tokens=1500)
-    if not result:
-        log("简报生成失败，brief 留空")
-        return categorized
+    expected = len(news_items_for_brief)
 
-    # 解析简报
-    briefs = [line.strip() for line in result.strip().split('\n') if line.strip()]
-    # 去掉可能的序号
-    cleaned_briefs = []
-    for brief in briefs:
-        brief = re.sub(r'^\d+[.、]\s*', '', brief).strip()
-        if brief:
-            cleaned_briefs.append(brief)
+    def _parse_briefs(raw: str) -> List[str]:
+        if not raw:
+            return []
+        lines = [line.strip() for line in raw.strip().split('\n') if line.strip()]
+        cleaned = []
+        for line in lines:
+            line = re.sub(r'^\d+[.、]\s*', '', line).strip()
+            if line:
+                cleaned.append(line)
+        # 兜底：若 LLM 把所有简报粘成一段（行数 < expected 一半），按句号切分
+        if len(cleaned) < max(1, expected // 2) and cleaned:
+            joined = "".join(cleaned)
+            split_back = split_long_paragraph_to_briefs(joined, expected)
+            if len(split_back) >= len(cleaned):
+                cleaned = split_back
+        return cleaned
 
-    # 填入 item['brief']
+    raw_result = call_llm_api(prompt, max_tokens=2500)
+    cleaned_briefs = _parse_briefs(raw_result)
+
+    # 计算合格率：含标点 + 长度合理
+    def _is_valid_brief(b: str) -> bool:
+        if not b or len(b) < 20 or len(b) > 120:
+            return False
+        ok, _ = validate_punctuation(b, min_internal=1, require_terminal=True)
+        return ok
+
+    valid_count = sum(1 for b in cleaned_briefs[:expected] if _is_valid_brief(b))
+    # 一次重试：合格率 < 70% 时重新生成
+    if expected > 0 and valid_count / expected < 0.7:
+        log(f"简报合格率偏低 ({valid_count}/{expected})，触发一次重试...")
+        raw_retry = call_llm_api(prompt, max_tokens=2500)
+        retry_briefs = _parse_briefs(raw_retry)
+        retry_valid = sum(1 for b in retry_briefs[:expected] if _is_valid_brief(b))
+        if retry_valid > valid_count:
+            cleaned_briefs = retry_briefs
+            valid_count = retry_valid
+
+    # 填入 item['brief']：不合格的丢弃，回退到 summary 截取（保证标点）
     idx = 0
+    accepted = 0
     for category, items in categorized.items():
         for item in items:
-            if idx < len(cleaned_briefs):
-                item['brief'] = cleaned_briefs[idx]
-                idx += 1
-            else:
-                item['brief'] = ''
+            brief = cleaned_briefs[idx] if idx < len(cleaned_briefs) else ''
+            if not _is_valid_brief(brief):
+                fallback = (item.get('summary') or item.get('original_summary') or '').strip()
+                fallback = clean_html_content(fallback)[:80]
+                if fallback and not has_terminal_punct(fallback):
+                    fallback = fallback.rstrip('，,；; ') + '。'
+                ok2, _ = validate_punctuation(fallback, min_internal=1, require_terminal=True)
+                brief = fallback if ok2 else ''
+            item['brief'] = brief
+            if brief:
+                accepted += 1
+            idx += 1
 
-    log(f"简报生成完成: {idx}/{len(news_items_for_brief)} 条")
+    log(f"简报生成完成: 合格{valid_count}/{expected}，最终入选{accepted}条（含summary兜底）")
     return categorized
 
 def generate_feature_article(categorized: Dict[str, List[Dict]]):
@@ -2174,13 +2272,49 @@ def call_deepseek_api(prompt, max_tokens=2000, retries=2):
             log(f"DeepSeek API 调用失败（第 {attempt + 1} 次尝试）: {e}")
 
 
+def call_qwen_api(prompt, max_tokens=2000, retries=2):
+    """调用阿里通义千问 API（DeepSeek 失败后的最终文本兜底）"""
+    if not QWEN_API_KEY:
+        return None
+    url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {QWEN_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "qwen-plus",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.3
+    }
+    for attempt in range(retries + 1):
+        try:
+            if attempt > 0:
+                wait = min(5 * (2 ** (attempt - 1)), 30)
+                log(f"Qwen API 重试第 {attempt} 次（等待 {wait}s）...")
+                time.sleep(wait)
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
+            response.raise_for_status()
+            result = response.json()
+            return result["choices"][0]["message"]["content"]
+        except Exception as e:
+            if attempt == retries:
+                log(f"Qwen API 调用失败（已重试 {retries} 次）: {e}")
+                return None
+            log(f"Qwen API 调用失败（第 {attempt + 1} 次尝试）: {e}")
+
+
 def call_claude_api(prompt, max_tokens=2000, retries=2):
     """调用 Claude Sonnet API 进行新闻分类、改写、微语生成"""
     try:
         import anthropic
     except ImportError:
         log("anthropic 包未安装，回退到 DeepSeek API")
-        return call_deepseek_api(prompt, max_tokens)
+        result = call_deepseek_api(prompt, max_tokens)
+        if result is None:
+            log("DeepSeek 不可用，回退到 Qwen API")
+            return call_qwen_api(prompt, max_tokens)
+        return result
 
     client = anthropic.Anthropic(
         api_key=ANTHROPIC_API_KEY,
@@ -2202,7 +2336,11 @@ def call_claude_api(prompt, max_tokens=2000, retries=2):
         except Exception as e:
             if attempt == retries:
                 log(f"Claude API 调用失败（已重试 {retries} 次）: {e}，回退到 DeepSeek")
-                return call_deepseek_api(prompt, max_tokens)
+                result = call_deepseek_api(prompt, max_tokens)
+                if result is None:
+                    log("DeepSeek 也失败，回退到 Qwen")
+                    return call_qwen_api(prompt, max_tokens)
+                return result
             log(f"Claude API 调用失败（第 {attempt + 1} 次尝试）: {e}")
 
 
@@ -2320,18 +2458,30 @@ def format_news_to_html(categorized: Dict[str, List[Dict]], yesterday_str: str, 
 - 当所有人都在追逐风口，定义规则的人往往已悄悄赢得下一局。
 - AI不会取代人，但懂得用AI的人，终将重塑每个行业的生存法则。"""
 
-    microword = call_llm_api(microword_prompt, max_tokens=300)
     default_microword = "科技的边界每天都在后退，而真正的壁垒，始终是人的认知与格局。"
+
+    def _try_microword():
+        raw = call_llm_api(microword_prompt, max_tokens=300)
+        if not raw:
+            return None
+        text = raw.strip().strip('"\'')
+        if len(text) < 15 or len(text) > 60:
+            return None
+        # 必须包含至少 1 个内部标点（治"整段无标点"）
+        ok, _ = validate_punctuation(text, min_internal=1, require_terminal=False)
+        if not ok:
+            return None
+        if not text.endswith(('。', '！', '？', '…')):
+            text = text + '。'
+        return text
+
+    microword = _try_microword()
     if not microword:
+        log("  微语首次生成不达标，重试一次")
+        microword = _try_microword()
+    if not microword:
+        log("  微语两次重试均不达标，使用默认值")
         microword = default_microword
-    microword = microword.strip().strip('"\'')
-    # 截断检测：如果微语太短或不以标点结尾，可能被截断，使用默认值
-    if len(microword) < 15 or (not microword.endswith(('。', '！', '？', '…')) and len(microword) > 45):
-        log(f"  微语可能被截断或格式异常（{len(microword)}字），使用默认值")
-        microword = default_microword
-    # 确保微语以标点符号结尾
-    if not microword.endswith(('。', '！', '？', '…')):
-        microword = microword + '。'
 
     # 使用 AI 生成智能摘要（用于微信公众号文章摘要）
     summary_prompt = f"""根据以下新闻标题，生成一句简短的文章摘要，用于微信公众号文章摘要。
@@ -2350,13 +2500,30 @@ def format_news_to_html(categorized: Dict[str, List[Dict]], yesterday_str: str, 
 5. 只输出摘要本身，不要任何前缀说明
 6. 确保以标点符号结尾（句号、感叹号或问号）"""
 
-    summary = call_llm_api(summary_prompt, max_tokens=150)
+    default_summary = "AI、科技、财经领域今日重要动态。"
+
+    def _try_summary():
+        raw = call_llm_api(summary_prompt, max_tokens=200)
+        if not raw:
+            return None
+        text = raw.strip().strip('"\'')
+        if len(text) < 15 or len(text) > 50:
+            return None
+        # 摘要必须含至少 1 个内部标点（避免"通义千问发布字节登顶机器人惊艳"这种无标点串）
+        ok, _ = validate_punctuation(text, min_internal=1, require_terminal=False)
+        if not ok:
+            return None
+        if not text.endswith(('。', '！', '？', '…')):
+            text = text + '。'
+        return text
+
+    summary = _try_summary()
     if not summary:
-        summary = "AI、科技、财经领域今日重要动态。"
-    summary = summary.strip().strip('"\'')
-    # 确保摘要以标点符号结尾
-    if not summary.endswith(('。', '！', '？', '…')):
-        summary = summary + '。'
+        log("  摘要首次生成不达标，重试一次")
+        summary = _try_summary()
+    if not summary:
+        log("  摘要两次重试均不达标，使用默认值")
+        summary = default_summary
 
     # 构建日期卡片内容
     date_card_lines = []
@@ -2584,6 +2751,37 @@ def main():
         categorized_news = generate_news_briefs(categorized_news)
         log("📌 周报模式：生成本周专题文章...")
         feature_article = generate_feature_article(categorized_news)
+
+    # 2.9 P1 质量熔断门：发布前最后一道关卡
+    # 防止"3 类全 0、空壳渲染"和"标题质量不达标"被推送出去
+    quality_total = sum(len(items) for items in categorized_news.values())
+    quality_min_per_cat = min((len(items) for items in categorized_news.values()), default=0)
+    titles_without_subject = 0
+    for items in categorized_news.values():
+        for item in items:
+            t = item.get("title", "")
+            if len(t) < 12:
+                titles_without_subject += 1
+    bad_ratio = titles_without_subject / quality_total if quality_total else 1.0
+
+    quality_failed = False
+    quality_reasons = []
+    if quality_total < 12:
+        quality_failed = True
+        quality_reasons.append(f"总条数{quality_total}<12")
+    if quality_min_per_cat < 4:
+        quality_failed = True
+        quality_reasons.append(f"最少类别{quality_min_per_cat}<4")
+    if bad_ratio > 0.25:
+        quality_failed = True
+        quality_reasons.append(f"过短标题率{bad_ratio:.0%}>25%")
+
+    if quality_failed:
+        log(f"❌ 质量熔断：拒绝发布。原因：{'; '.join(quality_reasons)}")
+        # 仍保存 raw_news 便于排查，但不渲染 HTML
+        save_raw_news(all_news, categorized_news, today_str, "质量熔断未发布")
+        return None, None
+    log(f"✅ 质量门通过：总{quality_total}条，最少类{quality_min_per_cat}条，过短率{bad_ratio:.0%}")
 
     # 3. 格式化为 HTML（同时生成智能摘要）
     log("正在格式化新闻...")
