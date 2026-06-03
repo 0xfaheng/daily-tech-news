@@ -36,8 +36,10 @@ except ImportError:
 WECHAT_API_KEY = get_env_var("WECHAT_API_KEY", required=False)
 DOUBAO_API_KEY = get_env_var("DOUBAO_API_KEY", required=False)
 DEEPSEEK_API_KEY = get_env_var("DEEPSEEK_API_KEY", required=False)
+TARGET_WECHAT_ACCOUNT = "三更AI"
+TARGET_WECHAT_APP_ID = "wx5c5f1c55d02d1354"
 # 从环境变量读取 AppID，默认使用三更AI
-APPID = get_env_var("WECHAT_APP_ID", default="wx5c5f1c55d02d1354", required=False)  # 三更AI
+APPID = get_env_var("WECHAT_APP_ID", default=TARGET_WECHAT_APP_ID, required=False)
 
 
 def parse_bool_env(value: str, default: bool = True) -> bool:
@@ -120,6 +122,11 @@ def check_environment(verbose: bool = True) -> bool:
 
     if not get_env_var("WECHAT_APP_ID", required=False):
         warnings.append(f"未设置 WECHAT_APP_ID，将使用默认公众号 (AppID: {APPID})")
+
+    if APPID != TARGET_WECHAT_APP_ID:
+        errors.append(
+            f"拒绝发布：WECHAT_APP_ID={APPID}，目标必须是{TARGET_WECHAT_ACCOUNT} (AppID: {TARGET_WECHAT_APP_ID})"
+        )
 
     if SSL_VERIFY is False:
         warnings.append("WECHAT_SSL_VERIFY=false，微信公众号发布将跳过 TLS 校验")
@@ -555,6 +562,13 @@ def generate_cover_image(title):
 
 def publish_to_wechat(title, content, cover_url):
     """发布到微信公众号"""
+    if APPID != TARGET_WECHAT_APP_ID:
+        log(
+            f"拒绝发布：当前 WECHAT_APP_ID={APPID}，目标必须是{TARGET_WECHAT_ACCOUNT} "
+            f"(AppID: {TARGET_WECHAT_APP_ID})"
+        )
+        return False
+
     url = f"{API_BASE}/wechat-publish"
 
     headers = {
