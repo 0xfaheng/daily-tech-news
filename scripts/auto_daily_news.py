@@ -392,7 +392,7 @@ def call_doubao_api(prompt, max_tokens=2000):
 
 
 def call_deepseek_api(prompt, max_tokens=2000):
-    """调用 DeepSeek-V3 API 生成内容（用于摘要等文本任务）"""
+    """调用 DeepSeek V4 Flash API 生成内容（用于摘要等文本任务）"""
     if not DEEPSEEK_API_KEY:
         return None
     url = "https://api.deepseek.com/chat/completions"
@@ -401,7 +401,7 @@ def call_deepseek_api(prompt, max_tokens=2000):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.3
@@ -417,7 +417,7 @@ def call_deepseek_api(prompt, max_tokens=2000):
 
 
 def call_llm_api(prompt, max_tokens=2000):
-    """调用 DeepSeek-V3 API"""
+    """调用 DeepSeek V4 Flash API"""
     return call_deepseek_api(prompt, max_tokens)
 
 def generate_news_html_with_rss(yesterday_str, today_lunar, today_weekday, today_date, weekly=False):

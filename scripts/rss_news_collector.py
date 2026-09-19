@@ -429,20 +429,15 @@ def is_valid_news_title(title: str) -> bool:
 DOUBAO_API_KEY = get_env_var("DOUBAO_API_KEY", required=False)
 DEEPSEEK_API_KEY = get_env_var("DEEPSEEK_API_KEY", required=False)
 QWEN_API_KEY = get_env_var("QWEN_API_KEY", required=False) or get_env_var("DASHSCOPE_API_KEY", required=False)
-ANTHROPIC_API_KEY = get_env_var("ANTHROPIC_API_KEY", required=False)
-ANTHROPIC_BASE_URL = get_env_var("ANTHROPIC_BASE_URL", required=False) or "https://api.anthropic.com"
 TAVILY_API_KEY = get_env_var("TAVILY_API_KEY", required=False)
 # 工作目录 - 兼容本地和 GitHub Actions
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_DIR = os.path.dirname(SCRIPT_DIR)
 LOG_FILE = os.path.join(WORK_DIR, "logs", "rss-news.log")
 
-# 检查 API Key：Claude 用于内容整理，DeepSeek 作为文本兜底，豆包 Seedream 用于封面图
-if not ANTHROPIC_API_KEY:
-    print("错误: 未设置 ANTHROPIC_API_KEY（环境变量或 .env.local）")
-    sys.exit(1)
+# 检查 API Key：DeepSeek 用于内容整理，Qwen 兜底，豆包 Seedream 用于封面图
 if not DEEPSEEK_API_KEY:
-    print("警告: 未设置 DEEPSEEK_API_KEY，Claude 失败时将依赖 Qwen 兜底")
+    print("警告: 未设置 DEEPSEEK_API_KEY，将依赖 Qwen 兜底")
 if not QWEN_API_KEY:
     print("警告: 未设置 QWEN_API_KEY/DASHSCOPE_API_KEY，DeepSeek 失败时将无最终兜底")
 if not DOUBAO_API_KEY:
@@ -2209,7 +2204,7 @@ def generate_feature_article(categorized: Dict[str, List[Dict]]):
 
 
 def call_doubao_api(prompt, max_tokens=2000, retries=3):
-    """调用豆包 API（仅封面图使用，内容整理已迁移到 Claude/DeepSeek）"""
+    """调用豆包 API（仅封面图使用，内容整理由 DeepSeek/Qwen 完成）"""
     if not DOUBAO_API_KEY:
         return None
     url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
@@ -2241,7 +2236,7 @@ def call_doubao_api(prompt, max_tokens=2000, retries=3):
 
 
 def call_deepseek_api(prompt, max_tokens=2000, retries=2):
-    """调用 DeepSeek-V3 API（Claude 不可用时的文本兜底）"""
+    """调用 DeepSeek V4 Flash API（内容整理主通道）"""
     if not DEEPSEEK_API_KEY:
         return None
     url = "https://api.deepseek.com/chat/completions"
@@ -2250,7 +2245,7 @@ def call_deepseek_api(prompt, max_tokens=2000, retries=2):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
         "temperature": 0.3
@@ -2304,49 +2299,13 @@ def call_qwen_api(prompt, max_tokens=2000, retries=2):
             log(f"Qwen API 调用失败（第 {attempt + 1} 次尝试）: {e}")
 
 
-def call_claude_api(prompt, max_tokens=2000, retries=2):
-    """调用 Claude Sonnet API 进行新闻分类、改写、微语生成"""
-    try:
-        import anthropic
-    except ImportError:
-        log("anthropic 包未安装，回退到 DeepSeek API")
-        result = call_deepseek_api(prompt, max_tokens)
-        if result is None:
-            log("DeepSeek 不可用，回退到 Qwen API")
-            return call_qwen_api(prompt, max_tokens)
-        return result
-
-    client = anthropic.Anthropic(
-        api_key=ANTHROPIC_API_KEY,
-        base_url=ANTHROPIC_BASE_URL,
-    )
-    for attempt in range(retries + 1):
-        try:
-            if attempt > 0:
-                wait = min(5 * (2 ** (attempt - 1)), 30)
-                log(f"Claude API 重试第 {attempt} 次（等待 {wait}s）...")
-                time.sleep(wait)
-            msg = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=max_tokens,
-                temperature=0.3,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return msg.content[0].text
-        except Exception as e:
-            if attempt == retries:
-                log(f"Claude API 调用失败（已重试 {retries} 次）: {e}，回退到 DeepSeek")
-                result = call_deepseek_api(prompt, max_tokens)
-                if result is None:
-                    log("DeepSeek 也失败，回退到 Qwen")
-                    return call_qwen_api(prompt, max_tokens)
-                return result
-            log(f"Claude API 调用失败（第 {attempt + 1} 次尝试）: {e}")
-
-
 def call_llm_api(prompt, max_tokens=2000):
-    """统一 LLM 入口：内容整理用 Claude Sonnet，封面图继续用豆包"""
-    return call_claude_api(prompt, max_tokens)
+    """统一 LLM 入口：DeepSeek 主通道，Qwen 兜底；封面图继续用豆包。"""
+    result = call_deepseek_api(prompt, max_tokens)
+    if result is None:
+        log("DeepSeek 不可用，回退到 Qwen")
+        return call_qwen_api(prompt, max_tokens)
+    return result
 
 def format_news_to_html(categorized: Dict[str, List[Dict]], yesterday_str: str, lunar_date: str = "", weekday: str = "", weekly: bool = False, week_range: str = "", feature_article=None) -> str:
     """将分类后的新闻格式化为 HTML（使用 inline style，兼容微信公众号）"""

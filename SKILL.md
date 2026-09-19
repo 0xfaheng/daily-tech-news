@@ -1,11 +1,22 @@
 ---
 name: daily-tech-news
-description: 每日AI科技财经资讯自动策展与发布。46个RSS源纯真实新闻，Claude Sonnet主力+DeepSeek-V3兜底，周一自动周报模式（卡片排版+本周专题），精美HTML排版，一键发布微信公众号。
-version: 4.5.0
-author: rulanlai
-tags: [news, automation, wechat, rss, ai]
+description: 每日AI科技财经资讯自动策展与发布。46个RSS源，DeepSeek V4 Flash 主力 + Qwen 兜底，周一自动周报模式、HTML排版和微信公众号草稿流程。
 ---
 
+> **DeepSeek 为何保留（2026-09-19 全局审校通道切换时的决定）**
+>
+> 本流程的设计执行环境是 **GitHub Actions 云端**（当前该 workflow 在 GitHub 上为
+> `disabled_manually`，已停跑；下述约束在重新启用时生效），而现行 Gemini 通道走的是**本机** AntiGravity 网关
+> `http://127.0.0.1:8045` —— 云端 runner 访问不到，所以本流程**不能**跟着换 Gemini。
+> 本机上有的只是 AntiGravity 网关 key（`sk-` 开头），不是 Google AI Studio 的官方 API key，
+> 拿不到云端可达的 Gemini。
+>
+> 因此这里**有意继续使用 DeepSeek**，不是漏改。同时已做一项加固：模型名从
+> `deepseek-v4-flash` 改为上游正名 `deepseek-flash`（旧名现在只是别名，回显已变为
+> `deepseek-flash`，别名随时可能被移除）。
+>
+> 若将来要换供应商，云端已配置的可选项是 `QWEN_API_KEY` 与 `DOUBAO_API_KEY`；但那会改变
+> 产出文风，需单独决定。或者申请 Google AI Studio 官方 key 后改为官方直连 Gemini。
 # Daily Tech News Publisher V4.5.0
 
 每日 AI/科技/财经资讯自动策展与发布系统。
@@ -34,20 +45,20 @@ tags: [news, automation, wechat, rss, ai]
 
 ```bash
 # 运行每日新闻采集与发布
-python3 ~/.claude/skills/daily-tech-news/scripts/auto_daily_news.py
+python3 ~/.codex/skills/daily-tech-news/scripts/auto_daily_news.py
 ```
 
 ### 高级用法
 
 ```bash
 # 仅检查环境依赖
-python3 ~/.claude/skills/daily-tech-news/scripts/auto_daily_news.py --check-env
+python3 ~/.codex/skills/daily-tech-news/scripts/auto_daily_news.py --check-env
 
 # 试运行（不发布）
-python3 ~/.claude/skills/daily-tech-news/scripts/auto_daily_news.py --dry-run
+python3 ~/.codex/skills/daily-tech-news/scripts/auto_daily_news.py --dry-run
 
 # 指定公众号发布
-python3 ~/.claude/skills/daily-tech-news/scripts/auto_daily_news.py --appid ${WECHAT_APP_ID}
+python3 ~/.codex/skills/daily-tech-news/scripts/auto_daily_news.py --appid ${WECHAT_APP_ID}
 ```
 
 ---
@@ -107,9 +118,9 @@ python3 ~/.claude/skills/daily-tech-news/scripts/auto_daily_news.py --appid ${WE
 **检查项目**：
 
 1. **脚本检查**：
-   - `~/.claude/skills/daily-tech-news/scripts/auto_daily_news.py`
-   - `~/.claude/skills/daily-tech-news/scripts/generate_image.py`
-   - `~/.claude/skills/daily-tech-news/scripts/rss_news_collector.py`
+   - `~/.codex/skills/daily-tech-news/scripts/auto_daily_news.py`
+   - `~/.codex/skills/daily-tech-news/scripts/generate_image.py`
+   - `~/.codex/skills/daily-tech-news/scripts/rss_news_collector.py`
 
 2. **环境变量检查**：
    - `WECHAT_API_KEY` ✅
@@ -190,7 +201,7 @@ python3 ~/.claude/skills/daily-tech-news/scripts/auto_daily_news.py --appid ${WE
 使用豆包 SeeDream API 生成封面图：
 
 ```bash
-python3 ~/.claude/skills/daily-tech-news/scripts/generate_image.py cover \
+python3 ~/.codex/skills/daily-tech-news/scripts/generate_image.py cover \
   --title "X月X日AI科技财经日报" \
   --style "tech" \
   --retry 3 \
@@ -221,7 +232,7 @@ python3 ~/.claude/skills/daily-tech-news/scripts/generate_image.py cover \
 使用微绿流量宝 API 发布：
 
 ```bash
-python3 ~/.claude/skills/daily-tech-news/scripts/auto_daily_news.py
+python3 ~/.codex/skills/daily-tech-news/scripts/auto_daily_news.py
 ```
 
 **发布参数**：
@@ -235,6 +246,8 @@ python3 ~/.claude/skills/daily-tech-news/scripts/auto_daily_news.py
 |------|-----|
 | 公众号 | 三更AI |
 | AppID | `${WECHAT_APP_ID}`（通过环境变量配置）|
+
+> 三更AI 账号层事实（AppID `wx5c5f1c55d02d1354`、账号键、微绿端点、密钥读取顺序、图床仓库、固定品牌组件）权威登记在系统级账号基座 `~/.codex/skills/sangeng-ai-account/SKILL.md`（Claude 侧同名路径 `~/.claude/skills/sangeng-ai-account/`）。本 skill 是该账号下「每日AI科技财经资讯」系列，与「企业AI落地实战」系列互不继承篇号与版式；本 skill 以 `WECHAT_API_KEY` 环境变量为密钥来源，轮换密钥时需与钥匙串同步。
 
 ---
 
@@ -342,17 +355,17 @@ export WECHAT_API_KEY="your-api-key"
 **排查步骤**：
 1. 检查网络连接：`curl -I https://www.jiqizhixin.com/rss`
 2. 检查 SSL 证书：确认 `certifi` 包已安装
-3. 查看日志：`cat ~/.claude/skills/daily-tech-news/logs/rss-news.log`
+3. 查看日志：`cat ~/.codex/skills/daily-tech-news/logs/rss-news.log`
 
 ### 封面图生成失败
 
 **症状**：`封面图生成失败，将不使用封面图发布`
 
 **排查步骤**：
-2. 检查脚本权限：`ls -la ~/.claude/skills/daily-tech-news/scripts/generate_image.py`
+2. 检查脚本权限：`ls -la ~/.codex/skills/daily-tech-news/scripts/generate_image.py`
 3. 手动测试：
    ```bash
-   python3 ~/.claude/skills/daily-tech-news/scripts/generate_image.py cover \
+   python3 ~/.codex/skills/daily-tech-news/scripts/generate_image.py cover \
      --title "测试封面" --style "tech" --size 2048x2048
    ```
 
