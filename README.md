@@ -1,3 +1,12 @@
+<!-- 0xfaheng-brand:start -->
+**0xfaheng · daily-tech-news**
+
+[品牌主页与全部公开项目](https://github.com/lairulan) · [当前仓库](https://github.com/lairulan/daily-tech-news)
+
+<!-- 0xfaheng-brand:end -->
+
+---
+
 # Daily Tech News - RSS 订阅版
 
 ## 概述
